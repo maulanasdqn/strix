@@ -1,0 +1,259 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1776239962328,
+  "projectRoot": "/home/keycode/Coding/github/strix",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Python",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "pyproject.toml"
+        ]
+      },
+      {
+        "name": "C/C++",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "Makefile"
+        ]
+      }
+    ],
+    "frameworks": [
+      {
+        "name": "fastapi",
+        "version": null,
+        "category": "backend"
+      },
+      {
+        "name": "pytest",
+        "version": null,
+        "category": "testing"
+      }
+    ],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "make build",
+    "testCommand": "make test",
+    "lintCommand": "ruff check",
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "scripts",
+      "tests"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "benchmarks": {
+      "path": "benchmarks",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1776239962320,
+      "keyFiles": [
+        "README.md"
+      ]
+    },
+    "containers": {
+      "path": "containers",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1776239962323,
+      "keyFiles": [
+        "Dockerfile",
+        "docker-entrypoint.sh"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 5,
+      "lastAccessed": 1776239962324,
+      "keyFiles": [
+        "README.md",
+        "contributing.mdx",
+        "docs.json",
+        "index.mdx",
+        "quickstart.mdx"
+      ]
+    },
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 3,
+      "lastAccessed": 1776239962324,
+      "keyFiles": [
+        "build.sh",
+        "docker.sh",
+        "install.sh"
+      ]
+    },
+    "strix": {
+      "path": "strix",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1776239962325,
+      "keyFiles": [
+        "__init__.py"
+      ]
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 2,
+      "lastAccessed": 1776239962325,
+      "keyFiles": [
+        "__init__.py",
+        "conftest.py"
+      ]
+    },
+    "strix/config": {
+      "path": "strix/config",
+      "purpose": "Configuration files",
+      "fileCount": 2,
+      "lastAccessed": 1776239962326,
+      "keyFiles": [
+        "__init__.py",
+        "config.py"
+      ]
+    },
+    "strix/utils": {
+      "path": "strix/utils",
+      "purpose": "Utility functions",
+      "fileCount": 2,
+      "lastAccessed": 1776239962326,
+      "keyFiles": [
+        "__init__.py",
+        "resource_paths.py"
+      ]
+    },
+    "tests/config": {
+      "path": "tests/config",
+      "purpose": "Configuration files",
+      "fileCount": 2,
+      "lastAccessed": 1776239962327,
+      "keyFiles": [
+        "__init__.py",
+        "test_config_telemetry.py"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "strix/llm/llm.py",
+      "accessCount": 22,
+      "lastAccessed": 1776250991474,
+      "type": "file"
+    },
+    {
+      "path": "strix/interface/main.py",
+      "accessCount": 17,
+      "lastAccessed": 1776247503602,
+      "type": "file"
+    },
+    {
+      "path": "tests/llm/test_oauth.py",
+      "accessCount": 15,
+      "lastAccessed": 1776251076927,
+      "type": "file"
+    },
+    {
+      "path": "strix/llm/oauth/constants.py",
+      "accessCount": 9,
+      "lastAccessed": 1776250038972,
+      "type": "file"
+    },
+    {
+      "path": "strix/llm/config.py",
+      "accessCount": 7,
+      "lastAccessed": 1776243592060,
+      "type": "file"
+    },
+    {
+      "path": "strix/llm/oauth/credentials.py",
+      "accessCount": 6,
+      "lastAccessed": 1776243576556,
+      "type": "file"
+    },
+    {
+      "path": "tests/llm/test_oauth_prefix.py",
+      "accessCount": 6,
+      "lastAccessed": 1776243653948,
+      "type": "file"
+    },
+    {
+      "path": "strix/llm/oauth/client.py",
+      "accessCount": 5,
+      "lastAccessed": 1776242749269,
+      "type": "file"
+    },
+    {
+      "path": "strix/llm/oauth/first_run.py",
+      "accessCount": 3,
+      "lastAccessed": 1776242746366,
+      "type": "file"
+    },
+    {
+      "path": "strix/llm/oauth/__init__.py",
+      "accessCount": 3,
+      "lastAccessed": 1776243581596,
+      "type": "file"
+    },
+    {
+      "path": "strix/config/config.py",
+      "accessCount": 2,
+      "lastAccessed": 1776242468557,
+      "type": "file"
+    },
+    {
+      "path": "",
+      "accessCount": 1,
+      "lastAccessed": 1776240739735,
+      "type": "directory"
+    },
+    {
+      "path": "strix/llm/utils.py",
+      "accessCount": 1,
+      "lastAccessed": 1776242251519,
+      "type": "file"
+    },
+    {
+      "path": "strix/llm/oauth/refresh.py",
+      "accessCount": 1,
+      "lastAccessed": 1776242320245,
+      "type": "file"
+    },
+    {
+      "path": "strix/agents/StrixAgent/system_prompt.jinja",
+      "accessCount": 1,
+      "lastAccessed": 1776244663505,
+      "type": "directory"
+    },
+    {
+      "path": ".venv/lib64/python3.13/site-packages/litellm/llms/anthropic/common_utils.py",
+      "accessCount": 1,
+      "lastAccessed": 1776246478453,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

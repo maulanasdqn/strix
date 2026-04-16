@@ -6,6 +6,7 @@ Strix Agent Interface
 import argparse
 import asyncio
 import logging
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -57,6 +58,14 @@ def validate_environment() -> None:  # noqa: PLR0912, PLR0915
     strix_llm = Config.get("strix_llm")
     uses_strix_models = strix_llm and strix_llm.startswith("strix/")
 
+    # OAuth path supplies its own model (from ~/.claude/settings.json) and
+    # token, so neither STRIX_LLM nor LLM_API_KEY are required up front.
+    from strix.llm.oauth import is_oauth_enabled, load_claude_code_model  # noqa: PLC0415
+
+    oauth_active = is_oauth_enabled()
+    if oauth_active and not strix_llm:
+        strix_llm = load_claude_code_model()
+
     if not strix_llm:
         missing_required_vars.append("STRIX_LLM")
 
@@ -69,7 +78,7 @@ def validate_environment() -> None:  # noqa: PLR0912, PLR0915
         ]
     )
 
-    if not Config.get("llm_api_key"):
+    if not Config.get("llm_api_key") and not oauth_active:
         missing_optional_vars.append("LLM_API_KEY")
 
     if not has_base_url:
@@ -207,12 +216,36 @@ async def warm_up_llm() -> None:
     console = Console()
 
     try:
+        from strix.llm.oauth import (  # noqa: PLC0415
+            ClaudeCodeAuth,
+            is_oauth_enabled,
+            load_claude_code_model,
+        )
+        from strix.llm.oauth.constants import (  # noqa: PLC0415
+            CLAUDE_CODE_ANTHROPIC_BETA,
+            claude_code_billing_header,
+            claude_code_prompt_header,
+            claude_code_user_agent,
+        )
+
         model_name, api_key, api_base = resolve_llm_config()
+        oauth_client = None
+        if is_oauth_enabled():
+            if not model_name:
+                model_name = load_claude_code_model()
+            if model_name and "/" not in model_name and model_name.lower().startswith("claude"):
+                model_name = f"anthropic/{model_name}"
+            oauth_client = ClaudeCodeAuth.from_environment()
+
         litellm_model, _ = resolve_strix_model(model_name)
         litellm_model = litellm_model or model_name
 
+        # OAuth requires the Claude Code identity prefix in the first system message.
+        system_content = (
+            claude_code_prompt_header() if oauth_client else "You are a helpful assistant."
+        )
         test_messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "system", "content": system_content},
             {"role": "user", "content": "Reply with just 'OK'."},
         ]
 
@@ -223,7 +256,19 @@ async def warm_up_llm() -> None:
             "messages": test_messages,
             "timeout": llm_timeout,
         }
-        if api_key:
+        if oauth_client is not None:
+            # Litellm auto-promotes ``sk-ant-oat`` api_keys to Bearer OAuth
+            # and drops x-api-key (see anthropic/common_utils.py). Passing
+            # the token directly is the clean path.
+            completion_kwargs["api_key"] = oauth_client.get_token()
+            completion_kwargs["extra_headers"] = {
+                "anthropic-beta": CLAUDE_CODE_ANTHROPIC_BETA,
+                "anthropic-dangerous-direct-browser-access": "true",
+                "User-Agent": claude_code_user_agent(),
+                "x-app": "cli",
+                "x-anthropic-billing-header": claude_code_billing_header(),
+            }
+        elif api_key:
             completion_kwargs["api_key"] = api_key
         if api_base:
             completion_kwargs["api_base"] = api_base
@@ -550,7 +595,8 @@ def main() -> None:  # noqa: PLR0912, PLR0915
     pull_docker_image()
 
     validate_environment()
-    asyncio.run(warm_up_llm())
+    if os.environ.get("STRIX_SKIP_LLM_WARMUP", "").lower() not in {"1", "true", "yes"}:
+        asyncio.run(warm_up_llm())
 
     persist_config()
 

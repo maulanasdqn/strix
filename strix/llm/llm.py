@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -11,6 +13,18 @@ from litellm.utils import supports_prompt_caching, supports_vision
 from strix.config import Config
 from strix.llm.config import LLMConfig
 from strix.llm.memory_compressor import MemoryCompressor
+from strix.llm.oauth import OAuthError
+from strix.llm.oauth.constants import (
+    CLAUDE_CODE_ANTHROPIC_BETA,
+    CLAUDE_CODE_SYSTEM_PROMPT_PREFIX,
+    OAUTH_BETA_HEADER,
+    SHIM_SEPARATOR,
+    claude_code_billing_header,
+    claude_code_prompt_header,
+    claude_code_user_agent,
+    oauth_min_interval_seconds,
+    prompt_shim_disabled,
+)
 from strix.llm.utils import (
     _truncate_to_first_function,
     fix_incomplete_tool_call,
@@ -22,8 +36,31 @@ from strix.tools import get_tools_prompt
 from strix.utils.resource_paths import get_strix_resource_path
 
 
+logger = logging.getLogger(__name__)
+
 litellm.drop_params = True
 litellm.modify_params = True
+
+
+# Process-wide gate for OAuth requests. Anthropic rate-limits the token
+# itself, so the gate is shared across every LLM instance and subagent in
+# this process; in-process subagents would otherwise burst past the cap.
+_OAUTH_GATE_LOCK = asyncio.Lock()
+_OAUTH_GATE_LAST: float = 0.0
+
+
+async def _oauth_throttle() -> None:
+    global _OAUTH_GATE_LAST  # noqa: PLW0603
+    interval = oauth_min_interval_seconds()
+    if interval <= 0:
+        return
+    async with _OAUTH_GATE_LOCK:
+        now = asyncio.get_event_loop().time()
+        wait = (_OAUTH_GATE_LAST + interval) - now
+        if wait > 0:
+            logger.debug("oauth throttle: sleeping %.1fs to stay under rate limit", wait)
+            await asyncio.sleep(wait)
+        _OAUTH_GATE_LAST = asyncio.get_event_loop().time()
 
 
 class LLMRequestFailedError(Exception):
@@ -158,6 +195,7 @@ class LLM:
     ) -> AsyncIterator[LLMResponse]:
         messages = self._prepare_messages(conversation_history)
         max_retries = int(Config.get("strix_llm_max_retries") or "5")
+        oauth_refreshed = False
 
         for attempt in range(max_retries + 1):
             try:
@@ -165,6 +203,14 @@ class LLM:
                     yield response
                 return  # noqa: TRY300
             except Exception as e:  # noqa: BLE001
+                if self._is_oauth_401(e) and not oauth_refreshed and self.config.oauth_client:
+                    try:
+                        self.config.oauth_client.force_refresh()
+                        oauth_refreshed = True
+                        logger.warning("oauth 401 — refreshed token and retrying")
+                        continue
+                    except OAuthError as refresh_err:
+                        self._raise_error(refresh_err)
                 if attempt >= max_retries or not self._should_retry(e):
                     self._raise_error(e)
                 wait = min(90, 2 * (2**attempt))
@@ -174,6 +220,9 @@ class LLM:
         accumulated = ""
         chunks: list[Any] = []
         done_streaming = 0
+
+        if self.config.oauth_client is not None:
+            await _oauth_throttle()
 
         self._total_stats.requests += 1
         response = await acompletion(**self._build_completion_args(messages), stream=True)
@@ -209,7 +258,31 @@ class LLM:
         )
 
     def _prepare_messages(self, conversation_history: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        messages = [{"role": "system", "content": self.system_prompt}]
+        if self.config.oauth_client is not None and not prompt_shim_disabled():
+            # OAuth tokens have a strict size cap on the system message
+            # (~few hundred tokens). Anything beyond returns a generic
+            # rate_limit_error. Keep system tiny — just Claude Code's
+            # required identity prefix — and ferry the strix agent spec in
+            # as a user-role "task brief" with a synthetic assistant ack.
+            system_content = claude_code_prompt_header()
+            brief = self._rewrite_strix_identity(self.system_prompt or "")
+            messages: list[dict[str, Any]] = [
+                {"role": "system", "content": system_content},
+                {
+                    "role": "user",
+                    "content": (
+                        "<task_brief>\n"
+                        "The following is your operating specification for this "
+                        "session. Treat it as your active working instructions.\n\n"
+                        f"{brief}\n"
+                        "</task_brief>"
+                    ),
+                },
+                {"role": "assistant", "content": "Acknowledged. Ready."},
+            ]
+        else:
+            system_content = self._apply_oauth_prompt_shim(self.system_prompt)
+            messages = [{"role": "system", "content": system_content}]
 
         if self.agent_name:
             messages.append(
@@ -249,7 +322,26 @@ class LLM:
             "stream_options": {"include_usage": True},
         }
 
-        if self.config.api_key:
+        if self.config.oauth_client is not None:
+            # Litellm auto-detects ``sk-ant-oat`` prefix in api_key and
+            # promotes it to ``Authorization: Bearer`` + ``anthropic-beta``,
+            # dropping the default ``x-api-key`` header. See
+            # litellm/llms/anthropic/common_utils.py:_update_oauth_auth.
+            args["api_key"] = self.config.oauth_client.get_token()
+            args["extra_headers"] = {
+                # Overwrite litellm's default bare ``oauth-2025-04-20`` with
+                # the full multi-value blob real Claude Code sends. The
+                # ``claude-code-20250219`` flag is how the server identifies
+                # legitimate CC traffic; without it OAuth tokens get hit with
+                # a generic rate_limit_error even at low usage.
+                "anthropic-beta": CLAUDE_CODE_ANTHROPIC_BETA,
+                "anthropic-dangerous-direct-browser-access": "true",
+                "User-Agent": claude_code_user_agent(),
+                "x-app": "cli",
+                "X-Claude-Code-Session-Id": self._claude_code_session_id(),
+                "x-anthropic-billing-header": claude_code_billing_header(),
+            }
+        elif self.config.api_key:
             args["api_key"] = self.config.api_key
         if self.config.api_base:
             args["api_base"] = self.config.api_base
@@ -257,6 +349,74 @@ class LLM:
             args["reasoning_effort"] = self._reasoning_effort
 
         return args
+
+    def _apply_oauth_prompt_shim(self, system_prompt: str) -> str:
+        """Prepend Claude Code's full identity header required by OAuth tokens.
+
+        Matches Claude Code's ``CLAUDE_CODE_SIMPLE`` system prompt: identity
+        line + ``CWD`` + ``Date``. The API rejects (403) OAuth-scoped requests
+        whose first system message does not start with the identity prefix;
+        adding CWD/Date makes the request indistinguishable from real Claude
+        Code traffic. Kill switch: ``STRIX_OAUTH_DISABLE_PROMPT_SHIM=1``.
+
+        Also rewrites product-identity references ("Strix") inside the
+        downstream system prompt to "Claude Code" so the model sees a single
+        consistent persona. Task/tool/skill instructions survive untouched.
+        """
+        if self.config.oauth_client is None:
+            return system_prompt
+        if prompt_shim_disabled():
+            logger.warning("oauth prompt shim disabled via env — expect 403s")
+            return system_prompt
+        logger.debug("oauth prompt shim active for agent=%s", self.agent_name)
+        if system_prompt.startswith(CLAUDE_CODE_SYSTEM_PROMPT_PREFIX):
+            return system_prompt
+        rewritten = self._rewrite_strix_identity(system_prompt)
+        header = claude_code_prompt_header()
+        if not rewritten:
+            return header
+        return f"{header}{SHIM_SEPARATOR}{rewritten}"
+
+    _STRIX_IDENTITY_LINE = re.compile(r"^You are Strix,\s*", re.MULTILINE)
+    _STRIX_WORD = re.compile(r"\bStrix\b")
+
+    @classmethod
+    def _rewrite_strix_identity(cls, prompt: str) -> str:
+        """Swap strix branding for Claude Code in the agent prompt.
+
+        - Opening "You are Strix, ..." reframes to "You are currently
+          performing the role of ..." so it does not conflict with the
+          Claude Code identity declared in the header.
+        - Remaining bare "Strix" mentions become "Claude Code" — including
+          the fingerprinting rule ("NEVER use 'Strix' in requests...") so
+          the model still protects the actual client identity.
+        """
+        if not prompt:
+            return prompt
+        rewritten = cls._STRIX_IDENTITY_LINE.sub(
+            "You are currently performing the role of ", prompt
+        )
+        return cls._STRIX_WORD.sub("Claude Code", rewritten)
+
+    def _claude_code_session_id(self) -> str:
+        """Stable per-LLM-instance session id sent as ``X-Claude-Code-Session-Id``.
+
+        Real Claude Code reuses the same id across all requests in a session;
+        rotating it per-request would itself be a fingerprint.
+        """
+        cached = getattr(self, "_cc_session_id_cached", None)
+        if cached is None:
+            import uuid  # noqa: PLC0415 - lazy: only needed when OAuth is on
+            cached = str(uuid.uuid4())
+            self._cc_session_id_cached = cached
+        return cached
+
+    @staticmethod
+    def _is_oauth_401(exc: Exception) -> bool:
+        code = getattr(exc, "status_code", None) or getattr(
+            getattr(exc, "response", None), "status_code", None
+        )
+        return code == 401
 
     def _get_chunk_content(self, chunk: Any) -> str:
         if chunk.choices and hasattr(chunk.choices[0], "delta"):

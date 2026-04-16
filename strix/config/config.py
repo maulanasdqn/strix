@@ -22,6 +22,15 @@ class Config:
     strix_llm_max_retries = "5"
     strix_memory_compressor_timeout = "30"
     llm_timeout = "300"
+    # Claude Code OAuth opt-in. Using Anthropic subscription OAuth tokens in
+    # third-party tooling may violate the Anthropic ToS; users must
+    # acknowledge via the first-run flow before these take effect.
+    strix_use_claude_code_oauth = None
+    claude_code_oauth_token = None
+    strix_oauth_ack = None
+    strix_oauth_token_url = None
+    strix_oauth_client_id = None
+    strix_oauth_disable_prompt_shim = None
     _LLM_CANONICAL_NAMES = (
         "strix_llm",
         "llm_api_key",
@@ -33,6 +42,11 @@ class Config:
         "strix_llm_max_retries",
         "strix_memory_compressor_timeout",
         "llm_timeout",
+        "strix_use_claude_code_oauth",
+        "claude_code_oauth_token",
+        "strix_oauth_token_url",
+        "strix_oauth_client_id",
+        "strix_oauth_disable_prompt_shim",
     )
 
     # Tool & Feature Configuration
