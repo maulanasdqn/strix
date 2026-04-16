@@ -25,6 +25,11 @@ from strix.llm.utils import resolve_strix_model
 
 apply_saved_config()
 
+from strix.llm.oauth import try_autodetect_and_enable  # noqa: E402
+
+
+_autodetected_claude_code = try_autodetect_and_enable()
+
 from strix.interface.cli import run_cli  # noqa: E402
 from strix.interface.tui import run_tui  # noqa: E402
 from strix.interface.utils import (  # noqa: E402
@@ -214,6 +219,11 @@ def check_docker_installed() -> None:
 
 async def warm_up_llm() -> None:
     console = Console()
+
+    if _autodetected_claude_code:
+        console.print(
+            "[dim]Using Claude Code credentials detected on this machine.[/dim]"
+        )
 
     try:
         from strix.llm.oauth import (  # noqa: PLC0415

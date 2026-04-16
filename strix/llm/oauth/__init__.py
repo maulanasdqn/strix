@@ -4,6 +4,7 @@ Opt-in via STRIX_USE_CLAUDE_CODE_OAUTH=1. See constants.py for the ToS risk
 notice; clients must surface it before first use.
 """
 
+from strix.llm.oauth.autodetect import try_autodetect_and_enable
 from strix.llm.oauth.client import ClaudeCodeAuth, OAuthError, OAuthNotConfiguredError
 from strix.llm.oauth.constants import (
     CLAUDE_CODE_SYSTEM_PROMPT_PREFIX,
@@ -21,4 +22,5 @@ __all__ = [
     "OAuthNotConfiguredError",
     "is_oauth_enabled",
     "load_claude_code_model",
+    "try_autodetect_and_enable",
 ]
