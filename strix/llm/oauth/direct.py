@@ -25,6 +25,8 @@ litellm's ``ModelResponseStream`` so strix's existing consumer code
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -269,3 +271,56 @@ async def acompletion_oauth_stream(
                     usage.total_tokens = usage.prompt_tokens + usage.completion_tokens
                     yield OAuthStreamChunk(usage=usage)
                     return
+
+
+async def acompletion_oauth_collect(
+    *,
+    model: str,
+    messages: list[dict[str, Any]],
+    access_token: str,
+    max_tokens: int = 8192,
+    timeout: float = 300.0,
+) -> tuple[str, _Usage | None]:
+    """Non-streaming convenience wrapper: run the stream to completion and
+    return the accumulated text and usage. For callers that don't need
+    incremental deltas (e.g. the dedupe judge)."""
+    content = ""
+    usage: _Usage | None = None
+    async for chunk in acompletion_oauth_stream(
+        model=model,
+        messages=messages,
+        access_token=access_token,
+        max_tokens=max_tokens,
+        timeout=timeout,
+    ):
+        if chunk.choices and chunk.choices[0].delta.content:
+            content += chunk.choices[0].delta.content
+        if chunk.usage is not None:
+            usage = chunk.usage
+    return content, usage
+
+
+def completion_oauth_collect(
+    *,
+    model: str,
+    messages: list[dict[str, Any]],
+    access_token: str,
+    max_tokens: int = 8192,
+    timeout: float = 300.0,
+) -> tuple[str, _Usage | None]:
+    """Sync wrapper for callers not already inside an event loop. If a loop
+    is running in the current thread we hop to a worker thread to avoid the
+    ``asyncio.run() cannot be called from a running event loop`` error."""
+    coro = acompletion_oauth_collect(
+        model=model,
+        messages=messages,
+        access_token=access_token,
+        max_tokens=max_tokens,
+        timeout=timeout,
+    )
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()

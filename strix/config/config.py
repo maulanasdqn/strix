@@ -5,45 +5,34 @@ from pathlib import Path
 from typing import Any
 
 
-STRIX_API_BASE = "https://models.strix.ai/api/v1"
-
-
 class Config:
-    """Configuration Manager for Strix."""
+    """Configuration Manager for Strix.
+
+    Strix authenticates exclusively through Claude Code OAuth — any
+    credential fields that belonged to the old multi-provider world
+    (``LLM_API_KEY``, ``LLM_API_BASE``, etc.) have been removed.
+    """
 
     # LLM Configuration
     strix_llm = None
-    llm_api_key = None
-    llm_api_base = None
-    openai_api_base = None
-    litellm_base_url = None
-    ollama_api_base = None
     strix_reasoning_effort = "high"
     strix_llm_max_retries = "5"
     strix_memory_compressor_timeout = "30"
     llm_timeout = "300"
-    # Claude Code OAuth opt-in. Using Anthropic subscription OAuth tokens in
-    # third-party tooling may violate the Anthropic ToS; users must
-    # acknowledge via the first-run flow before these take effect.
-    strix_use_claude_code_oauth = None
+    # Optional Claude Code OAuth overrides. Credentials are auto-loaded
+    # from ``~/.claude/.credentials.json`` (or the macOS keychain) — the
+    # env var below is only useful for CI / static-token setups.
     claude_code_oauth_token = None
-    strix_oauth_ack = None
     strix_oauth_token_url = None
     strix_oauth_client_id = None
     strix_oauth_disable_prompt_shim = None
     strix_oauth_max_tokens = None
     _LLM_CANONICAL_NAMES = (
         "strix_llm",
-        "llm_api_key",
-        "llm_api_base",
-        "openai_api_base",
-        "litellm_base_url",
-        "ollama_api_base",
         "strix_reasoning_effort",
         "strix_llm_max_retries",
         "strix_memory_compressor_timeout",
         "llm_timeout",
-        "strix_use_claude_code_oauth",
         "claude_code_oauth_token",
         "strix_oauth_token_url",
         "strix_oauth_client_id",
@@ -203,29 +192,6 @@ def save_current_config() -> bool:
     return Config.save_current()
 
 
-def resolve_llm_config() -> tuple[str | None, str | None, str | None]:
-    """Resolve LLM model, api_key, and api_base based on STRIX_LLM prefix.
-
-    Returns:
-        tuple: (model_name, api_key, api_base)
-        - model_name: Original model name (strix/ prefix preserved for display)
-        - api_key: LLM API key
-        - api_base: API base URL (auto-set to STRIX_API_BASE for strix/ models)
-    """
-    model = Config.get("strix_llm")
-    if not model:
-        return None, None, None
-
-    api_key = Config.get("llm_api_key")
-
-    if model.startswith("strix/"):
-        api_base: str | None = STRIX_API_BASE
-    else:
-        api_base = (
-            Config.get("llm_api_base")
-            or Config.get("openai_api_base")
-            or Config.get("litellm_base_url")
-            or Config.get("ollama_api_base")
-        )
-
-    return model, api_key, api_base
+def resolve_llm_config() -> str | None:
+    """Resolve the configured Claude Code model name, or None to defer."""
+    return Config.get("strix_llm")

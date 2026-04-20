@@ -3,7 +3,9 @@ from typing import Any
 
 import litellm
 
-from strix.config.config import Config, resolve_llm_config
+from strix.config.config import Config
+from strix.llm.oauth import ClaudeCodeAuth
+from strix.llm.oauth.direct import completion_oauth_collect
 
 
 logger = logging.getLogger(__name__)
@@ -104,21 +106,15 @@ def _summarize_messages(
     conversation = "\n".join(formatted)
     prompt = SUMMARY_PROMPT_TEMPLATE.format(conversation=conversation)
 
-    _, api_key, api_base = resolve_llm_config()
-
     try:
-        completion_args: dict[str, Any] = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "timeout": timeout,
-        }
-        if api_key:
-            completion_args["api_key"] = api_key
-        if api_base:
-            completion_args["api_base"] = api_base
-
-        response = litellm.completion(**completion_args)
-        summary = response.choices[0].message.content or ""
+        oauth = ClaudeCodeAuth.from_environment()
+        summary, _ = completion_oauth_collect(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            access_token=oauth.get_token(),
+            max_tokens=4096,
+            timeout=float(timeout),
+        )
         if not summary.strip():
             return messages[0]
         summary_msg = "<context_summary message_count='{count}'>{text}</context_summary>"

@@ -3,10 +3,10 @@ import logging
 import re
 from typing import Any
 
-import litellm
-
-from strix.config.config import resolve_llm_config
-from strix.llm.utils import resolve_strix_model
+from strix.config import Config
+from strix.llm.config import LLMConfig
+from strix.llm.oauth import ClaudeCodeAuth
+from strix.llm.oauth.direct import completion_oauth_collect
 
 
 logger = logging.getLogger(__name__)
@@ -156,9 +156,12 @@ def check_duplicate(
 
         comparison_data = {"candidate": candidate_cleaned, "existing_reports": existing_cleaned}
 
-        model_name, api_key, api_base = resolve_llm_config()
-        litellm_model, _ = resolve_strix_model(model_name)
-        litellm_model = litellm_model or model_name
+        # Resolve the model the same way LLMConfig does, then issue the
+        # request over Claude Code OAuth (strix's only auth method).
+        model = (
+            Config.get("strix_llm") or LLMConfig.DEFAULT_MODEL
+        )
+        oauth = ClaudeCodeAuth.from_environment()
 
         messages = [
             {"role": "system", "content": DEDUPE_SYSTEM_PROMPT},
@@ -172,19 +175,14 @@ def check_duplicate(
             },
         ]
 
-        completion_kwargs: dict[str, Any] = {
-            "model": litellm_model,
-            "messages": messages,
-            "timeout": 120,
-        }
-        if api_key:
-            completion_kwargs["api_key"] = api_key
-        if api_base:
-            completion_kwargs["api_base"] = api_base
+        content, _ = completion_oauth_collect(
+            model=model,
+            messages=messages,
+            access_token=oauth.get_token(),
+            max_tokens=2048,
+            timeout=120.0,
+        )
 
-        response = litellm.completion(**completion_kwargs)
-
-        content = response.choices[0].message.content
         if not content:
             return {
                 "is_duplicate": False,

@@ -7,7 +7,7 @@ from typing import Any
 
 import litellm
 from jinja2 import Environment, FileSystemLoader, select_autoescape
-from litellm import acompletion, completion_cost, stream_chunk_builder, supports_reasoning
+from litellm import completion_cost, supports_reasoning
 from litellm.utils import supports_prompt_caching, supports_vision
 
 from strix.config import Config
@@ -15,17 +15,13 @@ from strix.llm.config import LLMConfig
 from strix.llm.memory_compressor import MemoryCompressor
 from strix.llm.oauth import OAuthError
 from strix.llm.oauth.constants import (
-    CLAUDE_CODE_ANTHROPIC_BETA,
     CLAUDE_CODE_SYSTEM_PROMPT_PREFIX,
-    OAUTH_BETA_HEADER,
     SHIM_SEPARATOR,
-    claude_code_billing_line,
     claude_code_prompt_header,
-    claude_code_user_agent,
     oauth_min_interval_seconds,
     prompt_shim_disabled,
 )
-from strix.llm.oauth.direct import OAuthRequestError, acompletion_oauth_stream
+from strix.llm.oauth.direct import acompletion_oauth_stream
 from strix.llm.utils import (
     _truncate_to_first_function,
     fix_incomplete_tool_call,
@@ -222,27 +218,20 @@ class LLM:
         chunks: list[Any] = []
         done_streaming = 0
 
-        if self.config.oauth_client is not None:
-            await _oauth_throttle()
-
+        await _oauth_throttle()
         self._total_stats.requests += 1
 
-        if self.config.oauth_client is not None:
-            # Direct Anthropic OAuth path — bypasses litellm entirely. litellm
-            # strips the ``claude-code-20250219`` beta flag and filters out
-            # the ``x-anthropic-billing-header`` system block we need
-            # on the wire. See strix.llm.oauth.direct for details.
-            stream_source: AsyncIterator[Any] = acompletion_oauth_stream(
-                model=self.config.model_name,
-                messages=messages,
-                access_token=self.config.oauth_client.get_token(),
-                max_tokens=self._oauth_max_tokens(),
-                timeout=float(self.config.timeout),
-            )
-        else:
-            stream_source = await acompletion(
-                **self._build_completion_args(messages), stream=True
-            )
+        # Direct Anthropic call over Claude Code OAuth. See
+        # strix.llm.oauth.direct for why litellm is bypassed.
+        if not self._supports_vision():
+            messages = self._strip_images(messages)
+        stream_source = acompletion_oauth_stream(
+            model=self.config.model_name,
+            messages=messages,
+            access_token=self.config.oauth_client.get_token(),
+            max_tokens=self._oauth_max_tokens(),
+            timeout=float(self.config.timeout),
+        )
 
         async for chunk in stream_source:
             chunks.append(chunk)
@@ -264,17 +253,13 @@ class LLM:
                 yield LLMResponse(content=accumulated)
 
         if chunks:
-            if self.config.oauth_client is not None:
-                # Direct path emits usage on the terminal chunk — no chunk
-                # rebuild needed. Fall back to the final chunk if none carries
-                # usage (e.g. stream cut off).
-                final = next(
-                    (c for c in reversed(chunks) if getattr(c, "usage", None)),
-                    chunks[-1],
-                )
-                self._update_usage_stats(final)
-            else:
-                self._update_usage_stats(stream_chunk_builder(chunks))
+            # Direct path emits usage on the terminal chunk. Fall back to the
+            # last observed chunk if none carries usage (e.g. stream cut off).
+            final = next(
+                (c for c in reversed(chunks) if getattr(c, "usage", None)),
+                chunks[-1],
+            )
+            self._update_usage_stats(final)
 
         accumulated = normalize_tool_format(accumulated)
         accumulated = fix_incomplete_tool_call(_truncate_to_first_function(accumulated))
@@ -297,26 +282,25 @@ class LLM:
         return 32768
 
     def _prepare_messages(self, conversation_history: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        if self.config.oauth_client is not None and not prompt_shim_disabled():
-            # System is a two-block array: billing attribution first (what
-            # Anthropic reads server-side to classify the request as real
-            # Claude Code traffic) then the Claude Code identity header
+        if not prompt_shim_disabled():
+            # System is a two-block array: the Claude Code identity header
             # with ``cache_control: ephemeral`` on the last block, mirroring
-            # claude-rust's on-wire shape. Without the billing block the
-            # server returns a generic rate_limit_error regardless of usage.
-            # The strix agent spec rides as a user-role task brief so the
-            # system message stays small (OAuth has a tight size cap).
-            system_blocks = [
-                {"type": "text", "text": claude_code_billing_line()},
-                {
-                    "type": "text",
-                    "text": claude_code_prompt_header(),
-                    "cache_control": {"type": "ephemeral"},
-                },
-            ]
+            # claude-rust's on-wire shape. (Billing attribution is prepended
+            # automatically inside ``direct._hoist_system``.) Strix's agent
+            # spec rides as a user-role task brief so the system message
+            # stays small — OAuth has a tight size cap.
             brief = self._rewrite_strix_identity(self.system_prompt or "")
             messages: list[dict[str, Any]] = [
-                {"role": "system", "content": system_blocks},
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": claude_code_prompt_header(),
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                },
                 {
                     "role": "user",
                     "content": (
@@ -330,8 +314,11 @@ class LLM:
                 {"role": "assistant", "content": "Acknowledged. Ready."},
             ]
         else:
-            system_content = self._apply_oauth_prompt_shim(self.system_prompt)
-            messages = [{"role": "system", "content": system_content}]
+            # Kill switch: ship the raw strix prompt without the Claude Code
+            # identity header. Billing attribution still gets prepended by
+            # the direct client, but traffic becomes more distinguishable
+            # from real Claude Code — accept at your own risk.
+            messages = [{"role": "system", "content": self.system_prompt}]
 
         if self.agent_name:
             messages.append(
@@ -359,45 +346,6 @@ class LLM:
             messages = self._add_cache_control(messages)
 
         return messages
-
-    def _build_completion_args(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
-        if not self._supports_vision():
-            messages = self._strip_images(messages)
-
-        args: dict[str, Any] = {
-            "model": self.config.litellm_model,
-            "messages": messages,
-            "timeout": self.config.timeout,
-            "stream_options": {"include_usage": True},
-        }
-
-        if self.config.oauth_client is not None:
-            # Litellm auto-detects ``sk-ant-oat`` prefix in api_key and
-            # promotes it to ``Authorization: Bearer`` + ``anthropic-beta``,
-            # dropping the default ``x-api-key`` header. See
-            # litellm/llms/anthropic/common_utils.py:_update_oauth_auth.
-            # Header set mirrors claude-rust byte-for-byte: billing goes
-            # in the system body (see _prepare_messages), not on the wire.
-            args["api_key"] = self.config.oauth_client.get_token()
-            args["extra_headers"] = {
-                # Overwrite litellm's default bare ``oauth-2025-04-20`` with
-                # the full multi-value blob real Claude Code sends. The
-                # ``claude-code-20250219`` flag is how the server identifies
-                # legitimate CC traffic; without it OAuth tokens get hit with
-                # a generic rate_limit_error even at low usage.
-                "anthropic-beta": CLAUDE_CODE_ANTHROPIC_BETA,
-                "anthropic-dangerous-direct-browser-access": "true",
-                "User-Agent": claude_code_user_agent(),
-                "x-app": "cli",
-            }
-        elif self.config.api_key:
-            args["api_key"] = self.config.api_key
-        if self.config.api_base:
-            args["api_base"] = self.config.api_base
-        if self._supports_reasoning():
-            args["reasoning_effort"] = self._reasoning_effort
-
-        return args
 
     def _apply_oauth_prompt_shim(self, system_prompt: str) -> str:
         """Prepend Claude Code's full identity header required by OAuth tokens.

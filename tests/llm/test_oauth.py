@@ -270,36 +270,35 @@ def _make_llm_oauth(monkeypatch: pytest.MonkeyPatch) -> LLM:
     return LLM(cfg, agent_name=None)
 
 
-def test_build_completion_args_injects_bearer(
-    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    llm = _make_llm_oauth(monkeypatch)
-    args = llm._build_completion_args([{"role": "system", "content": "hi"}])
-    h = args["extra_headers"]
-    # Token passed via api_key; litellm converts to Bearer at the wire.
-    assert args["api_key"] == "test-access-token"
-    assert h["x-app"] == "cli"
-    assert h["User-Agent"].startswith("claude-cli/")
-    assert "(external, cli)" in h["User-Agent"]
+def test_oauth_direct_headers_shape() -> None:
+    """Wire shape used by the direct OAuth client matches claude-rust."""
+    from strix.llm.oauth.direct import build_oauth_headers
+
+    h = build_oauth_headers("test-access-token")
+    assert h["Authorization"] == "Bearer test-access-token"
+    assert h["anthropic-version"] == "2023-06-01"
     assert "claude-code-20250219" in h["anthropic-beta"]
     assert "prompt-caching-2024-07-31" in h["anthropic-beta"]
     assert h["anthropic-dangerous-direct-browser-access"] == "true"
-    # Billing attribution lives in the system body (see
-    # test_oauth_system_has_billing_block), NOT as an HTTP header —
-    # claude-rust wires it the same way and Anthropic reads it server-side.
+    assert h["x-app"] == "cli"
+    assert h["User-Agent"].startswith("claude-cli/")
+    assert "(external, cli)" in h["User-Agent"]
+    assert h["content-type"] == "application/json"
+    # Anti-regressions: strix used to send these and Anthropic rejected them
+    # as non-CC traffic.
     assert "x-anthropic-billing-header" not in h
-    # Session id is a strix-only header claude-rust never sends; leaving it
-    # on the wire makes requests fingerprintable.
     assert "X-Claude-Code-Session-Id" not in h
 
 
 def test_user_agent_version_overridable(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    llm = _make_llm_oauth(monkeypatch)
+    from strix.llm.oauth.direct import build_oauth_headers
+
     monkeypatch.setenv("STRIX_CLAUDE_CODE_VERSION", "9.9.9")
-    args = llm._build_completion_args([{"role": "system", "content": "x"}])
-    assert args["extra_headers"]["User-Agent"] == "claude-cli/9.9.9 (external, cli)"
+    assert (
+        build_oauth_headers("tok")["User-Agent"] == "claude-cli/9.9.9 (external, cli)"
+    )
 
 
 def test_oauth_prompt_shim_prepends(
@@ -321,22 +320,18 @@ def test_oauth_messages_move_brief_to_user(
     llm = _make_llm_oauth(monkeypatch)
     llm.system_prompt = "You are Strix, do pentest work and watch out for XSS."
     msgs = llm._prepare_messages([])
-    # System is a two-block array: billing first, identity header last with
-    # cache_control ephemeral. Matches claude-rust's on-wire shape.
+    # System carries just the Claude Code identity header with cache_control;
+    # billing attribution is prepended by the direct client, not here.
     assert msgs[0]["role"] == "system"
     blocks = msgs[0]["content"]
     assert isinstance(blocks, list)
-    assert len(blocks) == 2
+    assert len(blocks) == 1
     assert blocks[0]["type"] == "text"
-    assert blocks[0]["text"].startswith("x-anthropic-billing-header:")
-    assert "cc_version=" in blocks[0]["text"]
-    assert "cc_entrypoint=cli" in blocks[0]["text"]
-    assert blocks[1]["text"].startswith(CLAUDE_CODE_SYSTEM_PROMPT_PREFIX)
-    assert blocks[1]["cache_control"] == {"type": "ephemeral"}
-    # Neither system block leaks the heavy strix spec — OAuth has a tight
+    assert blocks[0]["text"].startswith(CLAUDE_CODE_SYSTEM_PROMPT_PREFIX)
+    assert blocks[0]["cache_control"] == {"type": "ephemeral"}
+    # System block never leaks the heavy strix spec — OAuth has a tight
     # size cap and it would push the request over.
     assert "pentest" not in blocks[0]["text"]
-    assert "pentest" not in blocks[1]["text"]
     # Strix spec lives inside a user-role task brief, with strix branding
     # rewritten so the persona stays Claude Code.
     assert msgs[1]["role"] == "user"
@@ -346,6 +341,34 @@ def test_oauth_messages_move_brief_to_user(
     assert "currently performing the role" in msgs[1]["content"]
     assert msgs[2]["role"] == "assistant"
     assert msgs[2]["content"] == "Acknowledged. Ready."
+
+
+def test_direct_hoist_prepends_billing_to_system() -> None:
+    """The direct client (not _prepare_messages) is what puts billing
+    attribution into the system body so Anthropic classifies the request
+    as real Claude Code traffic."""
+    from strix.llm.oauth.direct import _hoist_system
+
+    system_blocks, remaining = _hoist_system(
+        [
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": CLAUDE_CODE_SYSTEM_PROMPT_PREFIX,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+            },
+            {"role": "user", "content": "hi"},
+        ]
+    )
+    assert len(system_blocks) == 2
+    assert system_blocks[0]["text"].startswith("x-anthropic-billing-header:")
+    assert system_blocks[1]["text"].startswith(CLAUDE_CODE_SYSTEM_PROMPT_PREFIX)
+    assert system_blocks[-1]["cache_control"] == {"type": "ephemeral"}
+    assert remaining == [{"role": "user", "content": "hi"}]
 
 
 def test_oauth_shim_rewrites_strix_branding(
@@ -380,24 +403,16 @@ def test_oauth_prompt_shim_kill_switch(
     assert llm._apply_oauth_prompt_shim("raw") == "raw"
 
 
-def test_no_oauth_no_shim(
+def test_llmconfig_requires_oauth_credentials(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Strix is OAuth-only — constructing LLMConfig without Claude Code
+    credentials on the machine must fail loud, not silently fall back."""
     monkeypatch.setenv("STRIX_LLM", "anthropic/claude-sonnet-4-6")
-    llm = LLM(LLMConfig(model_name="anthropic/claude-sonnet-4-6"), agent_name=None)
-    assert llm.config.oauth_client is None
-    assert llm._apply_oauth_prompt_shim("raw") == "raw"
-
-
-def test_oauth_requires_anthropic_model(
-    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("STRIX_LLM", "openai/gpt-5.4")
-    monkeypatch.setenv("STRIX_USE_CLAUDE_CODE_OAUTH", "1")
-    monkeypatch.setenv("STRIX_OAUTH_ACK", "1")
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
-    with pytest.raises(ValueError, match="not an Anthropic Claude model"):
-        LLMConfig(model_name="openai/gpt-5.4")
+    # No CLAUDE_CODE_OAUTH_TOKEN, no ~/.claude/.credentials.json via
+    # isolated_home, no keychain — no credentials anywhere.
+    with pytest.raises(OAuthNotConfiguredError):
+        LLMConfig(model_name="anthropic/claude-sonnet-4-6")
 
 
 def test_is_oauth_401_detects_status(isolated_home: Path) -> None:

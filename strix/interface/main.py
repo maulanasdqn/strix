@@ -12,23 +12,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import litellm
 from docker.errors import DockerException
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
 from strix.config import Config, apply_saved_config, save_current_config
-from strix.config.config import resolve_llm_config
-from strix.llm.utils import resolve_strix_model
 
 
 apply_saved_config()
-
-from strix.llm.oauth import try_autodetect_and_enable  # noqa: E402
-
-
-_autodetected_claude_code = try_autodetect_and_enable()
 
 from strix.interface.cli import run_cli  # noqa: E402
 from strix.interface.tui import run_tui  # noqa: E402
@@ -45,7 +37,6 @@ from strix.interface.utils import (  # noqa: E402
     resolve_diff_scope_context,
     rewrite_localhost_targets,
     validate_config_file,
-    validate_llm_response,
 )
 from strix.runtime.docker_runtime import HOST_GATEWAY_HOSTNAME  # noqa: E402
 from strix.telemetry import posthog  # noqa: E402
@@ -55,144 +46,49 @@ from strix.telemetry.tracer import get_global_tracer  # noqa: E402
 logging.getLogger().setLevel(logging.ERROR)
 
 
-def validate_environment() -> None:  # noqa: PLR0912, PLR0915
+def validate_environment() -> None:
+    """Strix authenticates exclusively through Claude Code OAuth.
+
+    The only hard requirement is that Claude Code credentials are reachable
+    (file, env var, or macOS keychain). Everything else — model name,
+    perplexity key, reasoning effort — has sane defaults.
+    """
+    from strix.llm.oauth.credentials import load_credentials  # noqa: PLC0415
+
     console = Console()
-    missing_required_vars = []
-    missing_optional_vars = []
 
-    strix_llm = Config.get("strix_llm")
-    uses_strix_models = strix_llm and strix_llm.startswith("strix/")
+    if load_credentials() is not None:
+        return
 
-    # OAuth path supplies its own model (from ~/.claude/settings.json) and
-    # token, so neither STRIX_LLM nor LLM_API_KEY are required up front.
-    from strix.llm.oauth import is_oauth_enabled, load_claude_code_model  # noqa: PLC0415
-
-    oauth_active = is_oauth_enabled()
-    if oauth_active and not strix_llm:
-        strix_llm = load_claude_code_model()
-
-    if not strix_llm:
-        missing_required_vars.append("STRIX_LLM")
-
-    has_base_url = uses_strix_models or any(
-        [
-            Config.get("llm_api_base"),
-            Config.get("openai_api_base"),
-            Config.get("litellm_base_url"),
-            Config.get("ollama_api_base"),
-        ]
+    error_text = Text()
+    error_text.append("CLAUDE CODE OAUTH CREDENTIALS MISSING", style="bold red")
+    error_text.append("\n\n", style="white")
+    error_text.append(
+        "Strix requires an active Claude Code login on this machine.\n\n",
+        style="white",
+    )
+    error_text.append("To fix:\n", style="white")
+    error_text.append("  1. Install Claude Code: ", style="white")
+    error_text.append("https://claude.com/claude-code\n", style="dim cyan")
+    error_text.append("  2. Run: ", style="white")
+    error_text.append("claude /login\n", style="bold cyan")
+    error_text.append(
+        "\nOnce you're logged in, strix will pick up the credentials automatically.\n",
+        style="white",
     )
 
-    if not Config.get("llm_api_key") and not oauth_active:
-        missing_optional_vars.append("LLM_API_KEY")
+    panel = Panel(
+        error_text,
+        title="[bold white]STRIX",
+        title_align="left",
+        border_style="red",
+        padding=(1, 2),
+    )
 
-    if not has_base_url:
-        missing_optional_vars.append("LLM_API_BASE")
-
-    if not Config.get("perplexity_api_key"):
-        missing_optional_vars.append("PERPLEXITY_API_KEY")
-
-    if not Config.get("strix_reasoning_effort"):
-        missing_optional_vars.append("STRIX_REASONING_EFFORT")
-
-    if missing_required_vars:
-        error_text = Text()
-        error_text.append("MISSING REQUIRED ENVIRONMENT VARIABLES", style="bold red")
-        error_text.append("\n\n", style="white")
-
-        for var in missing_required_vars:
-            error_text.append(f"• {var}", style="bold yellow")
-            error_text.append(" is not set\n", style="white")
-
-        if missing_optional_vars:
-            error_text.append("\nOptional environment variables:\n", style="dim white")
-            for var in missing_optional_vars:
-                error_text.append(f"• {var}", style="dim yellow")
-                error_text.append(" is not set\n", style="dim white")
-
-        error_text.append("\nRequired environment variables:\n", style="white")
-        for var in missing_required_vars:
-            if var == "STRIX_LLM":
-                error_text.append("• ", style="white")
-                error_text.append("STRIX_LLM", style="bold cyan")
-                error_text.append(
-                    " - Model name to use with litellm (e.g., 'openai/gpt-5.4')\n",
-                    style="white",
-                )
-
-        if missing_optional_vars:
-            error_text.append("\nOptional environment variables:\n", style="white")
-            for var in missing_optional_vars:
-                if var == "LLM_API_KEY":
-                    error_text.append("• ", style="white")
-                    error_text.append("LLM_API_KEY", style="bold cyan")
-                    error_text.append(
-                        " - API key for the LLM provider "
-                        "(not needed for local models, Vertex AI, AWS, etc.)\n",
-                        style="white",
-                    )
-                elif var == "LLM_API_BASE":
-                    error_text.append("• ", style="white")
-                    error_text.append("LLM_API_BASE", style="bold cyan")
-                    error_text.append(
-                        " - Custom API base URL if using local models (e.g., Ollama, LMStudio)\n",
-                        style="white",
-                    )
-                elif var == "PERPLEXITY_API_KEY":
-                    error_text.append("• ", style="white")
-                    error_text.append("PERPLEXITY_API_KEY", style="bold cyan")
-                    error_text.append(
-                        " - API key for Perplexity AI web search (enables real-time research)\n",
-                        style="white",
-                    )
-                elif var == "STRIX_REASONING_EFFORT":
-                    error_text.append("• ", style="white")
-                    error_text.append("STRIX_REASONING_EFFORT", style="bold cyan")
-                    error_text.append(
-                        " - Reasoning effort level: none, minimal, low, medium, high, xhigh "
-                        "(default: high)\n",
-                        style="white",
-                    )
-
-        error_text.append("\nExample setup:\n", style="white")
-        error_text.append("export STRIX_LLM='openai/gpt-5.4'\n", style="dim white")
-
-        if missing_optional_vars:
-            for var in missing_optional_vars:
-                if var == "LLM_API_KEY":
-                    error_text.append(
-                        "export LLM_API_KEY='your-api-key-here'  "
-                        "# not needed for local models, Vertex AI, AWS, etc.\n",
-                        style="dim white",
-                    )
-                elif var == "LLM_API_BASE":
-                    error_text.append(
-                        "export LLM_API_BASE='http://localhost:11434'  "
-                        "# needed for local models only\n",
-                        style="dim white",
-                    )
-                elif var == "PERPLEXITY_API_KEY":
-                    error_text.append(
-                        "export PERPLEXITY_API_KEY='your-perplexity-key-here'\n", style="dim white"
-                    )
-                elif var == "STRIX_REASONING_EFFORT":
-                    error_text.append(
-                        "export STRIX_REASONING_EFFORT='high'\n",
-                        style="dim white",
-                    )
-
-        panel = Panel(
-            error_text,
-            title="[bold white]STRIX",
-            title_align="left",
-            border_style="red",
-            padding=(1, 2),
-        )
-
-        console.print("\n")
-        console.print(panel)
-        console.print()
-        sys.exit(1)
+    console.print("\n")
+    console.print(panel)
+    console.print()
+    sys.exit(1)
 
 
 def check_docker_installed() -> None:
@@ -220,72 +116,44 @@ def check_docker_installed() -> None:
 async def warm_up_llm() -> None:
     console = Console()
 
-    if _autodetected_claude_code:
-        console.print(
-            "[dim]Using Claude Code credentials detected on this machine.[/dim]"
-        )
+    console.print(
+        "[dim]Using Claude Code credentials detected on this machine.[/dim]"
+    )
 
     try:
-        from strix.llm.oauth import (  # noqa: PLC0415
-            ClaudeCodeAuth,
-            is_oauth_enabled,
-            load_claude_code_model,
-        )
+        from strix.llm.config import LLMConfig  # noqa: PLC0415
+        from strix.llm.oauth import ClaudeCodeAuth, load_claude_code_model  # noqa: PLC0415
         from strix.llm.oauth.credentials import (  # noqa: PLC0415
             normalize_claude_code_model,
         )
         from strix.llm.oauth.direct import acompletion_oauth_stream  # noqa: PLC0415
 
-        model_name, api_key, api_base = resolve_llm_config()
-        oauth_client = None
-        if is_oauth_enabled():
-            if not model_name:
-                model_name = load_claude_code_model()
-            if model_name and "/" not in model_name:
-                model_name = normalize_claude_code_model(model_name)
-                if model_name.lower().startswith("claude"):
-                    model_name = f"anthropic/{model_name}"
-            oauth_client = ClaudeCodeAuth.from_environment()
+        raw_model = (
+            Config.get("strix_llm")
+            or load_claude_code_model()
+            or LLMConfig.DEFAULT_MODEL
+        )
+        model_name = normalize_claude_code_model(raw_model)
+        oauth_client = ClaudeCodeAuth.from_environment()
 
         llm_timeout = int(Config.get("llm_timeout") or "300")
 
-        if oauth_client is not None:
-            # Direct Anthropic call — bypass litellm for the same reasons
-            # documented in strix.llm.oauth.direct. The billing attribution
-            # is prepended inside _hoist_system, so we only need the user
-            # turn here.
-            test_messages = [{"role": "user", "content": "Reply with just 'OK'."}]
-            got_ok = False
-            async for chunk in acompletion_oauth_stream(
-                model=model_name or "claude-sonnet-4-6",
-                messages=test_messages,
-                access_token=oauth_client.get_token(),
-                max_tokens=16,
-                timeout=float(llm_timeout),
-            ):
-                if chunk.choices and chunk.choices[0].delta.content:
-                    got_ok = True
-            if not got_ok:
-                raise RuntimeError("no content received from Anthropic OAuth stream")
-        else:
-            litellm_model, _ = resolve_strix_model(model_name)
-            litellm_model = litellm_model or model_name
-            test_messages = [
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": "Reply with just 'OK'."},
-            ]
-            completion_kwargs: dict[str, Any] = {
-                "model": litellm_model,
-                "messages": test_messages,
-                "timeout": llm_timeout,
-            }
-            if api_key:
-                completion_kwargs["api_key"] = api_key
-            if api_base:
-                completion_kwargs["api_base"] = api_base
-
-            response = litellm.completion(**completion_kwargs)
-            validate_llm_response(response)
+        # Warm-up ping over the same direct Anthropic path the main
+        # generator uses — confirms credentials work end to end before the
+        # user waits on the first real request.
+        test_messages = [{"role": "user", "content": "Reply with just 'OK'."}]
+        got_ok = False
+        async for chunk in acompletion_oauth_stream(
+            model=model_name,
+            messages=test_messages,
+            access_token=oauth_client.get_token(),
+            max_tokens=16,
+            timeout=float(llm_timeout),
+        ):
+            if chunk.choices and chunk.choices[0].delta.content:
+                got_ok = True
+        if not got_ok:
+            raise RuntimeError("no content received from Anthropic OAuth stream")
 
     except Exception as e:  # noqa: BLE001
         error_text = Text()
