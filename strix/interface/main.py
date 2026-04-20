@@ -237,14 +237,19 @@ async def warm_up_llm() -> None:
             claude_code_prompt_header,
             claude_code_user_agent,
         )
+        from strix.llm.oauth.credentials import (  # noqa: PLC0415
+            normalize_claude_code_model,
+        )
 
         model_name, api_key, api_base = resolve_llm_config()
         oauth_client = None
         if is_oauth_enabled():
             if not model_name:
                 model_name = load_claude_code_model()
-            if model_name and "/" not in model_name and model_name.lower().startswith("claude"):
-                model_name = f"anthropic/{model_name}"
+            if model_name and "/" not in model_name:
+                model_name = normalize_claude_code_model(model_name)
+                if model_name.lower().startswith("claude"):
+                    model_name = f"anthropic/{model_name}"
             oauth_client = ClaudeCodeAuth.from_environment()
 
         litellm_model, _ = resolve_strix_model(model_name)

@@ -3,6 +3,7 @@ from typing import Any
 from strix.config import Config
 from strix.config.config import resolve_llm_config
 from strix.llm.oauth import ClaudeCodeAuth, is_oauth_enabled, load_claude_code_model
+from strix.llm.oauth.credentials import normalize_claude_code_model
 from strix.llm.utils import resolve_strix_model
 
 
@@ -34,15 +35,13 @@ class LLMConfig:
         if not self.model_name:
             raise ValueError("STRIX_LLM environment variable must be set and not empty")
 
-        # Bare Claude model names (Claude Code's spelling) get the litellm
-        # provider prefix so litellm knows where to route. The wire request
+        # Bare Claude model names (Claude Code's spelling) get normalized
+        # then prefixed so litellm knows where to route. The wire request
         # still carries the bare id — matches Claude Code byte-for-byte.
-        if (
-            is_oauth_enabled()
-            and "/" not in self.model_name
-            and self.model_name.lower().startswith("claude")
-        ):
-            self.model_name = f"anthropic/{self.model_name}"
+        if is_oauth_enabled() and "/" not in self.model_name:
+            self.model_name = normalize_claude_code_model(self.model_name)
+            if self.model_name.lower().startswith("claude"):
+                self.model_name = f"anthropic/{self.model_name}"
 
         api_model, canonical = resolve_strix_model(self.model_name)
         self.litellm_model: str = api_model or self.model_name

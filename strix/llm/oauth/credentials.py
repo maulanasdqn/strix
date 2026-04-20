@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import subprocess  # nosec B404 - only invokes /usr/bin/security
 import sys
 from dataclasses import dataclass, field
@@ -125,6 +126,30 @@ _MODEL_ALIASES = {
     "haiku": "claude-haiku-4-5",
 }
 
+# Matches versioned Claude Code shorthand with either dash or dot separators:
+# "sonnet-4.6", "sonnet-4-6", "claude-sonnet-4.6", "claude-sonnet-4-6".
+_VERSIONED_CLAUDE_RE = re.compile(
+    r"^(?:claude-)?(sonnet|opus|haiku)-(\d+)[.\-](\d+)$"
+)
+
+
+def normalize_claude_code_model(name: str) -> str:
+    """Translate Claude Code shorthand to the canonical Anthropic model id.
+
+    Handles the bare-family aliases (``sonnet``/``opus``/``haiku``/``default``)
+    and versioned forms like ``sonnet-4.6``. Unknown names pass through
+    untouched so non-Claude models (or newer shapes we haven't met) don't
+    silently break.
+    """
+    lower = name.strip().lower()
+    if lower in _MODEL_ALIASES:
+        return _MODEL_ALIASES[lower]
+    match = _VERSIONED_CLAUDE_RE.match(lower)
+    if match:
+        family, major, minor = match.groups()
+        return f"claude-{family}-{major}-{minor}"
+    return name
+
 
 def load_claude_code_model() -> str | None:
     """Read the user's selected model from Claude Code's ``settings.json``.
@@ -144,7 +169,7 @@ def load_claude_code_model() -> str | None:
     model = data.get("model")
     if not isinstance(model, str) or not model:
         return None
-    return _MODEL_ALIASES.get(model.lower(), model)
+    return normalize_claude_code_model(model)
 
 
 def save_credentials(creds: OAuthCredentials) -> bool:

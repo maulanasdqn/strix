@@ -21,6 +21,7 @@ import pytest
 
 from strix.llm.oauth import first_run
 from strix.llm.oauth.autodetect import try_autodetect_and_enable
+from strix.llm.oauth.credentials import normalize_claude_code_model
 
 
 @pytest.fixture
@@ -138,3 +139,27 @@ def test_enables_when_expires_at_missing(isolated_home: Path) -> None:
 def test_skipped_when_no_creds(isolated_home: Path) -> None:
     assert try_autodetect_and_enable() is False
     assert "STRIX_USE_CLAUDE_CODE_OAUTH" not in os.environ
+
+
+@pytest.mark.parametrize(
+    ("input_name", "expected"),
+    [
+        ("sonnet", "claude-sonnet-4-6"),
+        ("opus", "claude-opus-4-6"),
+        ("haiku", "claude-haiku-4-5"),
+        ("default", "claude-sonnet-4-6"),
+        ("Sonnet", "claude-sonnet-4-6"),
+        ("sonnet-4.6", "claude-sonnet-4-6"),
+        ("opus-4.6", "claude-opus-4-6"),
+        ("haiku-4.5", "claude-haiku-4-5"),
+        ("sonnet-4-6", "claude-sonnet-4-6"),
+        ("claude-sonnet-4.6", "claude-sonnet-4-6"),
+        ("claude-sonnet-4-6", "claude-sonnet-4-6"),
+        # Unknown names pass through untouched — don't silently rewrite
+        # non-Claude models or shapes we haven't seen.
+        ("gpt-5.4", "gpt-5.4"),
+        ("anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4-6"),
+    ],
+)
+def test_normalize_claude_code_model(input_name: str, expected: str) -> None:
+    assert normalize_claude_code_model(input_name) == expected
