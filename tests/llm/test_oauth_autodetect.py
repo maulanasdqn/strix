@@ -219,3 +219,75 @@ def test_claude_code_version_falls_back_on_parse_failure(
         patch.object(constants_mod.subprocess, "run", return_value=fake_result),
     ):
         assert constants_mod.claude_code_version() == constants_mod.DEFAULT_CLAUDE_CODE_VERSION
+
+
+# ------------------------------------------------------------------
+# Message normalization: OpenAI image_url -> Anthropic image block
+# ------------------------------------------------------------------
+
+
+def test_normalize_converts_data_url_image_block() -> None:
+    from strix.llm.oauth.direct import _normalize_message
+
+    msg = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "here is a screenshot:"},
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,ABCDEF=="},
+            },
+        ],
+    }
+    result = _normalize_message(msg)
+    assert result["role"] == "user"
+    blocks = result["content"]
+    assert blocks[0] == {"type": "text", "text": "here is a screenshot:"}
+    assert blocks[1] == {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": "ABCDEF==",
+        },
+    }
+
+
+def test_normalize_converts_http_url_image_block() -> None:
+    from strix.llm.oauth.direct import _normalize_message
+
+    msg = {
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": "https://example/x.png"}}
+        ],
+    }
+    result = _normalize_message(msg)
+    assert result["content"][0] == {
+        "type": "image",
+        "source": {"type": "url", "url": "https://example/x.png"},
+    }
+
+
+def test_normalize_drops_malformed_image_block() -> None:
+    from strix.llm.oauth.direct import _normalize_message
+
+    msg = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "keep me"},
+            {"type": "image_url", "image_url": {}},  # no url
+            {"type": "image_url"},  # no image_url key at all
+        ],
+    }
+    result = _normalize_message(msg)
+    assert result["content"] == [{"type": "text", "text": "keep me"}]
+
+
+def test_normalize_passes_plain_string_through() -> None:
+    from strix.llm.oauth.direct import _normalize_message
+
+    assert _normalize_message({"role": "user", "content": "just text"}) == {
+        "role": "user",
+        "content": "just text",
+    }

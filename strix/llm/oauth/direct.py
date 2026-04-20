@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import json
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -139,15 +140,59 @@ def _hoist_system(
     return system_blocks, remaining
 
 
-def _normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
-    """Keep role + content; drop OpenAI-specific keys Anthropic rejects.
+_DATA_URL_RE = re.compile(
+    r"^data:(?P<media>[a-zA-Z0-9.+-]+/[a-zA-Z0-9.+-]+);base64,(?P<data>.*)$",
+    re.DOTALL,
+)
 
-    Strix uses plain text content (tool calls live inside the text as XML),
-    so no structural conversion is needed — just pass role/content through.
-    """
-    role = msg.get("role")
-    content = msg.get("content", "")
-    return {"role": role, "content": content}
+
+def _convert_image_block(block: dict[str, Any]) -> dict[str, Any] | None:
+    """Convert an OpenAI ``image_url`` content block to Anthropic's ``image``
+    block. Returns None if the shape is unexpected so the caller can drop it
+    rather than send something the API will reject."""
+    image_url = block.get("image_url") or {}
+    url = image_url.get("url") if isinstance(image_url, dict) else None
+    if not isinstance(url, str) or not url:
+        return None
+    match = _DATA_URL_RE.match(url)
+    if match:
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": match.group("media"),
+                "data": match.group("data"),
+            },
+        }
+    # Non-data URL — send via Anthropic's URL source mode.
+    return {"type": "image", "source": {"type": "url", "url": url}}
+
+
+def _normalize_content(content: Any) -> Any:
+    """Convert OpenAI-style content blocks (notably ``image_url``) to the
+    Anthropic block shapes the Messages API accepts. Plain strings pass
+    through unchanged."""
+    if not isinstance(content, list):
+        return content
+    converted: list[dict[str, Any]] = []
+    for block in content:
+        if not isinstance(block, dict):
+            converted.append(block)
+            continue
+        block_type = block.get("type")
+        if block_type == "image_url":
+            image_block = _convert_image_block(block)
+            if image_block is not None:
+                converted.append(image_block)
+            continue
+        converted.append(block)
+    return converted
+
+
+def _normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
+    """Keep role + content; rewrite OpenAI-only block types so the Anthropic
+    Messages API accepts them."""
+    return {"role": msg.get("role"), "content": _normalize_content(msg.get("content", ""))}
 
 
 def _build_request_body(
