@@ -31,6 +31,7 @@ class Config:
     strix_oauth_token_url = None
     strix_oauth_client_id = None
     strix_oauth_disable_prompt_shim = None
+    strix_oauth_max_tokens = None
     _LLM_CANONICAL_NAMES = (
         "strix_llm",
         "llm_api_key",
@@ -47,6 +48,7 @@ class Config:
         "strix_oauth_token_url",
         "strix_oauth_client_id",
         "strix_oauth_disable_prompt_shim",
+        "strix_oauth_max_tokens",
     )
 
     # Tool & Feature Configuration

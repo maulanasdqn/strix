@@ -231,15 +231,10 @@ async def warm_up_llm() -> None:
             is_oauth_enabled,
             load_claude_code_model,
         )
-        from strix.llm.oauth.constants import (  # noqa: PLC0415
-            CLAUDE_CODE_ANTHROPIC_BETA,
-            claude_code_billing_line,
-            claude_code_prompt_header,
-            claude_code_user_agent,
-        )
         from strix.llm.oauth.credentials import (  # noqa: PLC0415
             normalize_claude_code_model,
         )
+        from strix.llm.oauth.direct import acompletion_oauth_stream  # noqa: PLC0415
 
         model_name, api_key, api_base = resolve_llm_config()
         oauth_client = None
@@ -252,54 +247,45 @@ async def warm_up_llm() -> None:
                     model_name = f"anthropic/{model_name}"
             oauth_client = ClaudeCodeAuth.from_environment()
 
-        litellm_model, _ = resolve_strix_model(model_name)
-        litellm_model = litellm_model or model_name
-
-        # OAuth sends billing attribution and identity as two system blocks
-        # (billing first, identity last with cache_control), matching real
-        # Claude Code traffic. Non-OAuth: plain string system prompt.
-        if oauth_client is not None:
-            system_content: str | list[dict[str, Any]] = [
-                {"type": "text", "text": claude_code_billing_line()},
-                {
-                    "type": "text",
-                    "text": claude_code_prompt_header(),
-                    "cache_control": {"type": "ephemeral"},
-                },
-            ]
-        else:
-            system_content = "You are a helpful assistant."
-        test_messages = [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": "Reply with just 'OK'."},
-        ]
-
         llm_timeout = int(Config.get("llm_timeout") or "300")
 
-        completion_kwargs: dict[str, Any] = {
-            "model": litellm_model,
-            "messages": test_messages,
-            "timeout": llm_timeout,
-        }
         if oauth_client is not None:
-            # Litellm auto-promotes ``sk-ant-oat`` api_keys to Bearer OAuth
-            # and drops x-api-key (see anthropic/common_utils.py). Passing
-            # the token directly is the clean path.
-            completion_kwargs["api_key"] = oauth_client.get_token()
-            completion_kwargs["extra_headers"] = {
-                "anthropic-beta": CLAUDE_CODE_ANTHROPIC_BETA,
-                "anthropic-dangerous-direct-browser-access": "true",
-                "User-Agent": claude_code_user_agent(),
-                "x-app": "cli",
+            # Direct Anthropic call — bypass litellm for the same reasons
+            # documented in strix.llm.oauth.direct. The billing attribution
+            # is prepended inside _hoist_system, so we only need the user
+            # turn here.
+            test_messages = [{"role": "user", "content": "Reply with just 'OK'."}]
+            got_ok = False
+            async for chunk in acompletion_oauth_stream(
+                model=model_name or "claude-sonnet-4-6",
+                messages=test_messages,
+                access_token=oauth_client.get_token(),
+                max_tokens=16,
+                timeout=float(llm_timeout),
+            ):
+                if chunk.choices and chunk.choices[0].delta.content:
+                    got_ok = True
+            if not got_ok:
+                raise RuntimeError("no content received from Anthropic OAuth stream")
+        else:
+            litellm_model, _ = resolve_strix_model(model_name)
+            litellm_model = litellm_model or model_name
+            test_messages = [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "Reply with just 'OK'."},
+            ]
+            completion_kwargs: dict[str, Any] = {
+                "model": litellm_model,
+                "messages": test_messages,
+                "timeout": llm_timeout,
             }
-        elif api_key:
-            completion_kwargs["api_key"] = api_key
-        if api_base:
-            completion_kwargs["api_base"] = api_base
+            if api_key:
+                completion_kwargs["api_key"] = api_key
+            if api_base:
+                completion_kwargs["api_base"] = api_base
 
-        response = litellm.completion(**completion_kwargs)
-
-        validate_llm_response(response)
+            response = litellm.completion(**completion_kwargs)
+            validate_llm_response(response)
 
     except Exception as e:  # noqa: BLE001
         error_text = Text()

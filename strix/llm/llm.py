@@ -25,6 +25,7 @@ from strix.llm.oauth.constants import (
     oauth_min_interval_seconds,
     prompt_shim_disabled,
 )
+from strix.llm.oauth.direct import OAuthRequestError, acompletion_oauth_stream
 from strix.llm.utils import (
     _truncate_to_first_function,
     fix_incomplete_tool_call,
@@ -225,9 +226,25 @@ class LLM:
             await _oauth_throttle()
 
         self._total_stats.requests += 1
-        response = await acompletion(**self._build_completion_args(messages), stream=True)
 
-        async for chunk in response:
+        if self.config.oauth_client is not None:
+            # Direct Anthropic OAuth path — bypasses litellm entirely. litellm
+            # strips the ``claude-code-20250219`` beta flag and filters out
+            # the ``x-anthropic-billing-header`` system block we need
+            # on the wire. See strix.llm.oauth.direct for details.
+            stream_source: AsyncIterator[Any] = acompletion_oauth_stream(
+                model=self.config.model_name,
+                messages=messages,
+                access_token=self.config.oauth_client.get_token(),
+                max_tokens=self._oauth_max_tokens(),
+                timeout=float(self.config.timeout),
+            )
+        else:
+            stream_source = await acompletion(
+                **self._build_completion_args(messages), stream=True
+            )
+
+        async for chunk in stream_source:
             chunks.append(chunk)
             if done_streaming:
                 done_streaming += 1
@@ -247,7 +264,17 @@ class LLM:
                 yield LLMResponse(content=accumulated)
 
         if chunks:
-            self._update_usage_stats(stream_chunk_builder(chunks))
+            if self.config.oauth_client is not None:
+                # Direct path emits usage on the terminal chunk — no chunk
+                # rebuild needed. Fall back to the final chunk if none carries
+                # usage (e.g. stream cut off).
+                final = next(
+                    (c for c in reversed(chunks) if getattr(c, "usage", None)),
+                    chunks[-1],
+                )
+                self._update_usage_stats(final)
+            else:
+                self._update_usage_stats(stream_chunk_builder(chunks))
 
         accumulated = normalize_tool_format(accumulated)
         accumulated = fix_incomplete_tool_call(_truncate_to_first_function(accumulated))
@@ -256,6 +283,18 @@ class LLM:
             tool_invocations=parse_tool_invocations(accumulated),
             thinking_blocks=self._extract_thinking(chunks),
         )
+
+    def _oauth_max_tokens(self) -> int:
+        """Anthropic requires ``max_tokens`` for Messages requests. Default
+        high enough that strix's long-running pentest replies don't truncate;
+        override via ``STRIX_OAUTH_MAX_TOKENS``."""
+        raw = Config.get("strix_oauth_max_tokens")
+        if raw:
+            try:
+                return max(1, int(raw))
+            except ValueError:
+                pass
+        return 32768
 
     def _prepare_messages(self, conversation_history: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if self.config.oauth_client is not None and not prompt_shim_disabled():
