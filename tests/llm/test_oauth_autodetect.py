@@ -291,3 +291,141 @@ def test_normalize_passes_plain_string_through() -> None:
         "role": "user",
         "content": "just text",
     }
+
+
+def test_normalize_drops_empty_string_message() -> None:
+    from strix.llm.oauth.direct import _normalize_message
+
+    assert _normalize_message({"role": "user", "content": ""}) is None
+    assert _normalize_message({"role": "user", "content": "   "}) is None
+
+
+def test_normalize_drops_empty_content_list() -> None:
+    from strix.llm.oauth.direct import _normalize_message
+
+    # All blocks get filtered by image conversion — empty array would 400.
+    assert _normalize_message({"role": "user", "content": []}) is None
+    # List with only empty text blocks is also empty for API purposes.
+    assert (
+        _normalize_message(
+            {"role": "user", "content": [{"type": "text", "text": "  "}]}
+        )
+        is None
+    )
+
+
+def test_normalize_remaps_openai_tool_role_to_user() -> None:
+    from strix.llm.oauth.direct import _normalize_message
+
+    result = _normalize_message(
+        {"role": "tool", "tool_call_id": "x", "content": "tool output"}
+    )
+    assert result == {"role": "user", "content": "tool output"}
+
+
+def test_normalize_drops_unknown_role() -> None:
+    from strix.llm.oauth.direct import _normalize_message
+
+    assert _normalize_message({"role": "developer", "content": "x"}) is None
+
+
+def test_build_request_body_merges_consecutive_same_role() -> None:
+    from strix.llm.oauth.direct import _build_request_body
+
+    body = _build_request_body(
+        "anthropic/claude-sonnet-4-6",
+        [
+            {"role": "user", "content": "first user"},
+            {"role": "user", "content": "second user"},
+            {"role": "assistant", "content": "ack"},
+            {"role": "user", "content": "q1"},
+            {"role": "user", "content": "q2"},
+        ],
+        max_tokens=64,
+    )
+    msgs = body["messages"]
+    assert len(msgs) == 3
+    assert msgs[0]["role"] == "user"
+    assert "first user" in msgs[0]["content"]
+    assert "second user" in msgs[0]["content"]
+    assert msgs[1]["role"] == "assistant"
+    assert msgs[2]["role"] == "user"
+    assert "q1" in msgs[2]["content"]
+    assert "q2" in msgs[2]["content"]
+
+
+def test_build_request_body_prepends_user_if_starts_with_assistant() -> None:
+    from strix.llm.oauth.direct import _build_request_body
+
+    body = _build_request_body(
+        "anthropic/claude-sonnet-4-6",
+        [
+            {"role": "assistant", "content": "stray assistant"},
+            {"role": "user", "content": "real user"},
+        ],
+        max_tokens=64,
+    )
+    assert body["messages"][0]["role"] == "user"
+    # Placeholder first, then the original assistant+user preserved.
+    assert len(body["messages"]) == 3
+
+
+def test_build_request_body_drops_empty_messages_before_wire() -> None:
+    from strix.llm.oauth.direct import _build_request_body
+
+    body = _build_request_body(
+        "anthropic/claude-sonnet-4-6",
+        [
+            {"role": "user", "content": ""},
+            {"role": "user", "content": "real content"},
+            {"role": "assistant", "content": []},
+            {"role": "user", "content": "more"},
+        ],
+        max_tokens=64,
+    )
+    # Empty user and empty-list assistant both got dropped, then the two
+    # user messages merged into one.
+    assert len(body["messages"]) == 1
+    assert body["messages"][0]["role"] == "user"
+    assert "real content" in body["messages"][0]["content"]
+    assert "more" in body["messages"][0]["content"]
+
+
+def test_build_request_body_strips_openai_only_fields() -> None:
+    """``name``, ``tool_calls``, ``tool_call_id``, ``function_call`` are
+    OpenAI-only — if they leak into a message we don't forward them."""
+    from strix.llm.oauth.direct import _build_request_body
+
+    body = _build_request_body(
+        "anthropic/claude-sonnet-4-6",
+        [
+            {
+                "role": "user",
+                "name": "alice",
+                "tool_calls": [{"id": "x"}],
+                "function_call": {"name": "foo"},
+                "tool_call_id": "x",
+                "content": "hello",
+            }
+        ],
+        max_tokens=64,
+    )
+    msg = body["messages"][0]
+    assert set(msg.keys()) == {"role", "content"}
+
+
+def test_build_request_body_strips_role_system_from_messages() -> None:
+    """``role: system`` in the messages array would 400 the request — must
+    be hoisted to top-level ``system`` instead."""
+    from strix.llm.oauth.direct import _build_request_body
+
+    body = _build_request_body(
+        "anthropic/claude-sonnet-4-6",
+        [
+            {"role": "system", "content": "you are..."},
+            {"role": "user", "content": "hello"},
+        ],
+        max_tokens=64,
+    )
+    assert all(m["role"] in ("user", "assistant") for m in body["messages"])
+    assert body["system"][-1]["text"] == "you are..."

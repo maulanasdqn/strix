@@ -189,10 +189,78 @@ def _normalize_content(content: Any) -> Any:
     return converted
 
 
-def _normalize_message(msg: dict[str, Any]) -> dict[str, Any]:
-    """Keep role + content; rewrite OpenAI-only block types so the Anthropic
-    Messages API accepts them."""
-    return {"role": msg.get("role"), "content": _normalize_content(msg.get("content", ""))}
+_OPENAI_ROLE_REMAP = {
+    # OpenAI's tool-response role has no Anthropic equivalent; the closest
+    # shape is a user-role message carrying the tool output. Strix encodes
+    # tool results as XML inside plain text, so simple re-labelling works.
+    "tool": "user",
+    "function": "user",
+}
+
+
+def _normalize_message(msg: dict[str, Any]) -> dict[str, Any] | None:
+    """Keep only role + content; rewrite OpenAI-only shapes so the Anthropic
+    Messages API accepts them. Returns ``None`` if the message ends up
+    empty after normalization — callers should drop it rather than forward
+    an empty block that Anthropic would 400 on."""
+    role = msg.get("role")
+    if role in _OPENAI_ROLE_REMAP:
+        role = _OPENAI_ROLE_REMAP[role]
+    if role not in ("user", "assistant"):
+        # ``system`` is hoisted elsewhere; unknown roles get dropped.
+        return None
+    content = _normalize_content(msg.get("content", ""))
+    if not _content_has_payload(content):
+        return None
+    return {"role": role, "content": content}
+
+
+def _content_has_payload(content: Any) -> bool:
+    """Does this content carry anything Anthropic will accept? Empty strings,
+    empty lists, and lists containing only empty text blocks all fail the API
+    validator, so we treat them as no-payload."""
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict):
+                return True
+            if block.get("type") == "text":
+                if (block.get("text") or "").strip():
+                    return True
+                continue
+            return True
+        return False
+    return content is not None
+
+
+def _merge_adjacent_same_role(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Anthropic rejects consecutive same-role messages. This happens in
+    practice when sub-agents inherit a user-led context or when tool-result
+    user messages land right after the initial user turn. We merge by
+    concatenating their contents — strings join with a blank line, lists
+    concatenate, and mixed string/list coerce to list so no data is lost."""
+    merged: list[dict[str, Any]] = []
+    for msg in messages:
+        if merged and merged[-1]["role"] == msg["role"]:
+            prev = merged[-1]
+            prev["content"] = _concat_content(prev["content"], msg["content"])
+        else:
+            merged.append({**msg})
+    return merged
+
+
+def _concat_content(a: Any, b: Any) -> Any:
+    if isinstance(a, str) and isinstance(b, str):
+        return f"{a}\n\n{b}"
+    if isinstance(a, list) and isinstance(b, list):
+        return a + b
+    if isinstance(a, str):
+        return [{"type": "text", "text": a}, *b]
+    # isinstance(b, str)
+    return [*a, {"type": "text", "text": b}]
 
 
 def _build_request_body(
@@ -201,10 +269,29 @@ def _build_request_body(
     max_tokens: int,
 ) -> dict[str, Any]:
     system_blocks, remaining = _hoist_system(messages)
+
+    normalized: list[dict[str, Any]] = []
+    for m in remaining:
+        out = _normalize_message(m)
+        if out is not None:
+            normalized.append(out)
+
+    # Anthropic requires the first message to be user-role. If the
+    # conversation starts with assistant (e.g. after a trimming pass
+    # removed the opening user turn) prepend a placeholder so the API
+    # doesn't 400. Better to surface the history than fail silently.
+    if normalized and normalized[0]["role"] != "user":
+        normalized.insert(
+            0,
+            {"role": "user", "content": "<meta>Continue.</meta>"},
+        )
+
+    normalized = _merge_adjacent_same_role(normalized)
+
     body: dict[str, Any] = {
         "model": _strip_model_prefix(model),
         "max_tokens": max_tokens,
-        "messages": [_normalize_message(m) for m in remaining],
+        "messages": normalized,
         "stream": True,
     }
     if system_blocks:
