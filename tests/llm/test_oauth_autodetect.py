@@ -19,6 +19,9 @@ if TYPE_CHECKING:
 
 import pytest
 
+from unittest.mock import MagicMock, patch
+
+from strix.llm.oauth import constants as constants_mod
 from strix.llm.oauth import first_run
 from strix.llm.oauth.autodetect import try_autodetect_and_enable
 from strix.llm.oauth.credentials import normalize_claude_code_model
@@ -163,3 +166,56 @@ def test_skipped_when_no_creds(isolated_home: Path) -> None:
 )
 def test_normalize_claude_code_model(input_name: str, expected: str) -> None:
     assert normalize_claude_code_model(input_name) == expected
+
+
+@pytest.fixture
+def clear_version_cache() -> None:
+    constants_mod._detect_installed_claude_code_version.cache_clear()
+    yield
+    constants_mod._detect_installed_claude_code_version.cache_clear()
+
+
+def test_claude_code_version_uses_detected_when_no_override(
+    clear_version_cache: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("STRIX_CLAUDE_CODE_VERSION", raising=False)
+    fake_result = MagicMock(returncode=0, stdout="2.1.200 (Claude Code)\n")
+    with (
+        patch.object(constants_mod.shutil, "which", return_value="/usr/bin/claude"),
+        patch.object(constants_mod.subprocess, "run", return_value=fake_result),
+    ):
+        assert constants_mod.claude_code_version() == "2.1.200"
+
+
+def test_claude_code_version_override_beats_detection(
+    clear_version_cache: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("STRIX_CLAUDE_CODE_VERSION", "9.9.9")
+    # Detection should not even run when override is present — but if it did,
+    # the override must still win.
+    fake_result = MagicMock(returncode=0, stdout="2.1.200 (Claude Code)\n")
+    with (
+        patch.object(constants_mod.shutil, "which", return_value="/usr/bin/claude"),
+        patch.object(constants_mod.subprocess, "run", return_value=fake_result),
+    ):
+        assert constants_mod.claude_code_version() == "9.9.9"
+
+
+def test_claude_code_version_falls_back_when_cli_missing(
+    clear_version_cache: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("STRIX_CLAUDE_CODE_VERSION", raising=False)
+    with patch.object(constants_mod.shutil, "which", return_value=None):
+        assert constants_mod.claude_code_version() == constants_mod.DEFAULT_CLAUDE_CODE_VERSION
+
+
+def test_claude_code_version_falls_back_on_parse_failure(
+    clear_version_cache: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("STRIX_CLAUDE_CODE_VERSION", raising=False)
+    fake_result = MagicMock(returncode=0, stdout="unexpected garbage output\n")
+    with (
+        patch.object(constants_mod.shutil, "which", return_value="/usr/bin/claude"),
+        patch.object(constants_mod.subprocess, "run", return_value=fake_result),
+    ):
+        assert constants_mod.claude_code_version() == constants_mod.DEFAULT_CLAUDE_CODE_VERSION

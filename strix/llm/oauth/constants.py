@@ -6,7 +6,10 @@ STRIX_OAUTH_CLIENT_ID because Anthropic may rotate either without notice.
 
 from __future__ import annotations
 
+import functools
 import os
+import shutil
+import subprocess  # nosec B404 - only invokes the user's installed `claude` CLI
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -47,18 +50,59 @@ CLAUDE_CODE_SYSTEM_PROMPT_PREFIX = (
 SHIM_SEPARATOR = "\n\n---\n\n"
 
 
-DEFAULT_CLAUDE_CODE_VERSION = "2.0.5"
+DEFAULT_CLAUDE_CODE_VERSION = "2.1.114"
+
+
+@functools.lru_cache(maxsize=1)
+def _detect_installed_claude_code_version() -> str | None:
+    """Best-effort read of the local ``claude --version`` output.
+
+    Anthropic rejects OAuth requests whose User-Agent version drifts too far
+    from the current Claude Code release (generic ``rate_limit_error`` with
+    no Retry-After). Matching the installed CLI makes strix's requests
+    indistinguishable from a real Claude Code session on the same machine.
+    Returns None if the CLI is missing, times out, or prints something we
+    can't parse.
+    """
+    exe = shutil.which("claude")
+    if not exe:
+        return None
+    try:
+        result = subprocess.run(  # nosec B603 - fixed argv, no shell
+            [exe, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    first_token = result.stdout.strip().split()[0:1]
+    if not first_token:
+        return None
+    candidate = first_token[0]
+    # Require something that looks like a semver head (digit-dot-digit…).
+    if not candidate or not candidate[0].isdigit() or "." not in candidate:
+        return None
+    return candidate
 
 
 def claude_code_version() -> str:
     """Claude Code CLI version reported in headers.
 
-    Override via ``STRIX_CLAUDE_CODE_VERSION`` to match whatever
-    ``claude --version`` prints on the host. Default tracks a recent stable
-    release; an exact match makes the request indistinguishable from a real
-    Claude Code session, while a stale default still authenticates.
+    Precedence: ``STRIX_CLAUDE_CODE_VERSION`` env override → live detection
+    from ``claude --version`` on PATH → hardcoded default. The hardcoded
+    value is a fallback floor; bump it when Anthropic starts rejecting it.
     """
-    return os.environ.get("STRIX_CLAUDE_CODE_VERSION") or DEFAULT_CLAUDE_CODE_VERSION
+    override = os.environ.get("STRIX_CLAUDE_CODE_VERSION")
+    if override:
+        return override
+    detected = _detect_installed_claude_code_version()
+    if detected:
+        return detected
+    return DEFAULT_CLAUDE_CODE_VERSION
 
 
 def claude_code_user_agent() -> str:
