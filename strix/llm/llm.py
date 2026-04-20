@@ -19,7 +19,7 @@ from strix.llm.oauth.constants import (
     CLAUDE_CODE_SYSTEM_PROMPT_PREFIX,
     OAUTH_BETA_HEADER,
     SHIM_SEPARATOR,
-    claude_code_billing_header,
+    claude_code_billing_line,
     claude_code_prompt_header,
     claude_code_user_agent,
     oauth_min_interval_seconds,
@@ -259,15 +259,25 @@ class LLM:
 
     def _prepare_messages(self, conversation_history: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if self.config.oauth_client is not None and not prompt_shim_disabled():
-            # OAuth tokens have a strict size cap on the system message
-            # (~few hundred tokens). Anything beyond returns a generic
-            # rate_limit_error. Keep system tiny — just Claude Code's
-            # required identity prefix — and ferry the strix agent spec in
-            # as a user-role "task brief" with a synthetic assistant ack.
-            system_content = claude_code_prompt_header()
+            # System is a two-block array: billing attribution first (what
+            # Anthropic reads server-side to classify the request as real
+            # Claude Code traffic) then the Claude Code identity header
+            # with ``cache_control: ephemeral`` on the last block, mirroring
+            # claude-rust's on-wire shape. Without the billing block the
+            # server returns a generic rate_limit_error regardless of usage.
+            # The strix agent spec rides as a user-role task brief so the
+            # system message stays small (OAuth has a tight size cap).
+            system_blocks = [
+                {"type": "text", "text": claude_code_billing_line()},
+                {
+                    "type": "text",
+                    "text": claude_code_prompt_header(),
+                    "cache_control": {"type": "ephemeral"},
+                },
+            ]
             brief = self._rewrite_strix_identity(self.system_prompt or "")
             messages: list[dict[str, Any]] = [
-                {"role": "system", "content": system_content},
+                {"role": "system", "content": system_blocks},
                 {
                     "role": "user",
                     "content": (
@@ -327,6 +337,8 @@ class LLM:
             # promotes it to ``Authorization: Bearer`` + ``anthropic-beta``,
             # dropping the default ``x-api-key`` header. See
             # litellm/llms/anthropic/common_utils.py:_update_oauth_auth.
+            # Header set mirrors claude-rust byte-for-byte: billing goes
+            # in the system body (see _prepare_messages), not on the wire.
             args["api_key"] = self.config.oauth_client.get_token()
             args["extra_headers"] = {
                 # Overwrite litellm's default bare ``oauth-2025-04-20`` with
@@ -338,8 +350,6 @@ class LLM:
                 "anthropic-dangerous-direct-browser-access": "true",
                 "User-Agent": claude_code_user_agent(),
                 "x-app": "cli",
-                "X-Claude-Code-Session-Id": self._claude_code_session_id(),
-                "x-anthropic-billing-header": claude_code_billing_header(),
             }
         elif self.config.api_key:
             args["api_key"] = self.config.api_key
@@ -397,19 +407,6 @@ class LLM:
             "You are currently performing the role of ", prompt
         )
         return cls._STRIX_WORD.sub("Claude Code", rewritten)
-
-    def _claude_code_session_id(self) -> str:
-        """Stable per-LLM-instance session id sent as ``X-Claude-Code-Session-Id``.
-
-        Real Claude Code reuses the same id across all requests in a session;
-        rotating it per-request would itself be a fingerprint.
-        """
-        cached = getattr(self, "_cc_session_id_cached", None)
-        if cached is None:
-            import uuid  # noqa: PLC0415 - lazy: only needed when OAuth is on
-            cached = str(uuid.uuid4())
-            self._cc_session_id_cached = cached
-        return cached
 
     @staticmethod
     def _is_oauth_401(exc: Exception) -> bool:

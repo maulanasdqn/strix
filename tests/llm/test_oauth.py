@@ -284,21 +284,13 @@ def test_build_completion_args_injects_bearer(
     assert "claude-code-20250219" in h["anthropic-beta"]
     assert "prompt-caching-2024-07-31" in h["anthropic-beta"]
     assert h["anthropic-dangerous-direct-browser-access"] == "true"
-    assert h["x-anthropic-billing-header"].startswith("cc_version=")
-    assert "cc_entrypoint=cli" in h["x-anthropic-billing-header"]
-    assert h["X-Claude-Code-Session-Id"]
-
-
-def test_session_id_stable_across_calls(
-    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    llm = _make_llm_oauth(monkeypatch)
-    a = llm._build_completion_args([{"role": "system", "content": "x"}])
-    b = llm._build_completion_args([{"role": "system", "content": "x"}])
-    assert (
-        a["extra_headers"]["X-Claude-Code-Session-Id"]
-        == b["extra_headers"]["X-Claude-Code-Session-Id"]
-    )
+    # Billing attribution lives in the system body (see
+    # test_oauth_system_has_billing_block), NOT as an HTTP header —
+    # claude-rust wires it the same way and Anthropic reads it server-side.
+    assert "x-anthropic-billing-header" not in h
+    # Session id is a strix-only header claude-rust never sends; leaving it
+    # on the wire makes requests fingerprintable.
+    assert "X-Claude-Code-Session-Id" not in h
 
 
 def test_user_agent_version_overridable(
@@ -308,7 +300,6 @@ def test_user_agent_version_overridable(
     monkeypatch.setenv("STRIX_CLAUDE_CODE_VERSION", "9.9.9")
     args = llm._build_completion_args([{"role": "system", "content": "x"}])
     assert args["extra_headers"]["User-Agent"] == "claude-cli/9.9.9 (external, cli)"
-    assert "cc_version=9.9.9" in args["extra_headers"]["x-anthropic-billing-header"]
 
 
 def test_oauth_prompt_shim_prepends(
@@ -330,14 +321,22 @@ def test_oauth_messages_move_brief_to_user(
     llm = _make_llm_oauth(monkeypatch)
     llm.system_prompt = "You are Strix, do pentest work and watch out for XSS."
     msgs = llm._prepare_messages([])
-    # System message is small — just the Claude Code identity header, never
-    # the heavy strix spec (Anthropic OAuth size cap).
+    # System is a two-block array: billing first, identity header last with
+    # cache_control ephemeral. Matches claude-rust's on-wire shape.
     assert msgs[0]["role"] == "system"
-    sys_text = msgs[0]["content"]
-    if isinstance(sys_text, list):  # cache_control wraps as [{"type":"text",...}]
-        sys_text = sys_text[0]["text"]
-    assert sys_text.startswith(CLAUDE_CODE_SYSTEM_PROMPT_PREFIX)
-    assert "pentest" not in sys_text
+    blocks = msgs[0]["content"]
+    assert isinstance(blocks, list)
+    assert len(blocks) == 2
+    assert blocks[0]["type"] == "text"
+    assert blocks[0]["text"].startswith("x-anthropic-billing-header:")
+    assert "cc_version=" in blocks[0]["text"]
+    assert "cc_entrypoint=cli" in blocks[0]["text"]
+    assert blocks[1]["text"].startswith(CLAUDE_CODE_SYSTEM_PROMPT_PREFIX)
+    assert blocks[1]["cache_control"] == {"type": "ephemeral"}
+    # Neither system block leaks the heavy strix spec — OAuth has a tight
+    # size cap and it would push the request over.
+    assert "pentest" not in blocks[0]["text"]
+    assert "pentest" not in blocks[1]["text"]
     # Strix spec lives inside a user-role task brief, with strix branding
     # rewritten so the persona stays Claude Code.
     assert msgs[1]["role"] == "user"

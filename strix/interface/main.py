@@ -233,7 +233,7 @@ async def warm_up_llm() -> None:
         )
         from strix.llm.oauth.constants import (  # noqa: PLC0415
             CLAUDE_CODE_ANTHROPIC_BETA,
-            claude_code_billing_header,
+            claude_code_billing_line,
             claude_code_prompt_header,
             claude_code_user_agent,
         )
@@ -255,10 +255,20 @@ async def warm_up_llm() -> None:
         litellm_model, _ = resolve_strix_model(model_name)
         litellm_model = litellm_model or model_name
 
-        # OAuth requires the Claude Code identity prefix in the first system message.
-        system_content = (
-            claude_code_prompt_header() if oauth_client else "You are a helpful assistant."
-        )
+        # OAuth sends billing attribution and identity as two system blocks
+        # (billing first, identity last with cache_control), matching real
+        # Claude Code traffic. Non-OAuth: plain string system prompt.
+        if oauth_client is not None:
+            system_content: str | list[dict[str, Any]] = [
+                {"type": "text", "text": claude_code_billing_line()},
+                {
+                    "type": "text",
+                    "text": claude_code_prompt_header(),
+                    "cache_control": {"type": "ephemeral"},
+                },
+            ]
+        else:
+            system_content = "You are a helpful assistant."
         test_messages = [
             {"role": "system", "content": system_content},
             {"role": "user", "content": "Reply with just 'OK'."},
@@ -281,7 +291,6 @@ async def warm_up_llm() -> None:
                 "anthropic-dangerous-direct-browser-access": "true",
                 "User-Agent": claude_code_user_agent(),
                 "x-app": "cli",
-                "x-anthropic-billing-header": claude_code_billing_header(),
             }
         elif api_key:
             completion_kwargs["api_key"] = api_key

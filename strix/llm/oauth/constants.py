@@ -112,7 +112,7 @@ def claude_code_user_agent() -> str:
 
 
 def claude_code_billing_header() -> str:
-    """Attribution header sent on every Claude Code request.
+    """Attribution payload sent on every Claude Code request.
 
     Format mirrors ``getAttributionHeader`` in claude-code-rust:
     ``cc_version=<v>; cc_entrypoint=<entry>;``. ``cc_entrypoint`` defaults
@@ -121,6 +121,19 @@ def claude_code_billing_header() -> str:
     """
     entrypoint = os.environ.get("STRIX_CLAUDE_CODE_ENTRYPOINT") or "cli"
     return f"cc_version={claude_code_version()}; cc_entrypoint={entrypoint};"
+
+
+def claude_code_billing_line() -> str:
+    """Billing attribution as Claude Code actually wires it.
+
+    Real Claude Code sends this string as the first text block of the
+    request-body ``system`` array (not as an HTTP header), matching
+    claude-rust's ``BILLING_HEADER_LINE``. Anthropic reads it server-side
+    for session attribution; sending it only as an HTTP header leaves the
+    request indistinguishable from non-Claude-Code OAuth traffic and
+    triggers a generic ``rate_limit_error``.
+    """
+    return f"x-anthropic-billing-header: {claude_code_billing_header()}"
 
 
 def claude_code_prompt_header() -> str:
